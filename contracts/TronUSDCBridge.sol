@@ -15,7 +15,7 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
 
     /// @custom:storage-location erc7201:openzeppelin.storage.USDCStakingBridge
     struct BridgeStorage {
-        IERC20 usdcToken;
+        IERC20 token;
         mapping(address => bool) whitelist;
         uint256 totalDeposited;
         uint256 minDepositAmount;
@@ -39,11 +39,11 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
     event WhitelistStatusChanged(bool enabled);
 
     function initialize(
-        address _usdcToken,
+        address _token,
         address owner,
         uint256 _minDepositAmount
     ) public initializer {
-        require(_usdcToken != address(0), "Invalid USDC token address");
+        require(_token != address(0), "Invalid token address");
         require(owner != address(0), "Invalid owner address");
         require(_minDepositAmount > 0, "Minimum deposit amount must be greater than 0");
 
@@ -52,7 +52,7 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
         __Ownable_init(owner);
 
         BridgeStorage storage $ = _getBridgeStorage();
-        $.usdcToken = IERC20(_usdcToken);
+        $.token = IERC20(_token);
         $.minDepositAmount = _minDepositAmount;
         $.whitelistEnabled = true;
     }
@@ -66,9 +66,15 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
         _;
     }
 
-    function usdcToken() public view returns (IERC20) {
+    function token() public view returns (IERC20) {
         BridgeStorage storage $ = _getBridgeStorage();
-        return $.usdcToken;
+        return $.token;
+    }
+
+    function setToken(address _newToken) external onlyOwner {
+        require(_newToken != address(0), "Invalid token address");
+        BridgeStorage storage $ = _getBridgeStorage();
+        $.token = IERC20(_newToken);
     }
 
     function deposit(uint256 amount, string calldata targetTronAddress) external
@@ -80,7 +86,7 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
         require(amount >= $.minDepositAmount, "Amount below minimum transfer amount");
         require(bytes(targetTronAddress).length == 34, "Invalid Tron address length");
 
-        $.usdcToken.safeTransferFrom(_msgSender(), address(this), amount);
+        $.token.safeTransferFrom(_msgSender(), address(this), amount);
         $.totalDeposited += amount;
         emit Deposited(_msgSender(), amount, targetTronAddress);
     }
@@ -91,7 +97,7 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
         require(amount <= USDCBalance(), "Insufficient USDC balance");
 
         $.totalDeposited -= amount;
-        $.usdcToken.safeTransfer(user, amount);
+        $.token.safeTransfer(user, amount);
         emit Withdrawn(user, amount);
     }
 
@@ -119,12 +125,12 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
         require(amount > 0, "Amount must be greater than 0");
         require(amount <= USDCBalance(), "Insufficient USDC balance");
 
-        usdcToken().safeTransfer(to, amount);
+        token().safeTransfer(to, amount);
         emit USDCTransferred(to, amount);
     }
 
     function USDCBalance() public view returns (uint256) {
-        return usdcToken().balanceOf(address(this));
+        return token().balanceOf(address(this));
     }
 
     function isWhitelistEnabled() public view returns (bool) {
@@ -169,13 +175,13 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
     /**
      * @dev send all token balance of an arbitrary erc20 token
      * in the contract to another address
-     * @param token token to reclaim
+     * @param _token token to reclaim
      * @param _to address to send eth balance to
      */
-    function reclaimToken(IERC20 token, address _to) external onlyOwner {
+    function reclaimToken(IERC20 _token, address _to) external onlyOwner {
         require(_to != address(0), "Invalid address");
-        require(address(token) != address(usdcToken()), "Cannot reclaim USDC");
-        uint256 balance = token.balanceOf(address(this));
-        token.safeTransfer(_to, balance);
+        require(address(_token) != address(token()), "Cannot reclaim USDC");
+        uint256 balance = _token.balanceOf(address(this));
+        _token.safeTransfer(_to, balance);
     }
 }

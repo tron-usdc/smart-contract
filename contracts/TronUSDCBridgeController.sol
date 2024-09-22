@@ -377,6 +377,10 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         bridge().acceptOwnership();
     }
 
+    function setBridgeToken(address _newToken) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        bridge().setToken(_newToken);
+    }
+
     function bridge() public view returns (ITronUSDCBridge) {
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
         return $.bridge;

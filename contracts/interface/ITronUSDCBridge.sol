@@ -25,4 +25,6 @@ interface ITronUSDCBridge {
     function acceptOwnership() external;
 
     function transferOwnership(address newOwner) external;
+
+    function setToken(address _newToken) external;
 }
