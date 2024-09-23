@@ -82,7 +82,7 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
     error InvalidOperation();
 
     function initialize(
-        address _tronUSDC,
+        address _token,
         address _admin,
         uint256 _instantMintThreshold,
         uint256 _ratifiedMintThreshold,
@@ -93,7 +93,7 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         uint256 _feeRate,
         address _treasury
     ) public initializer {
-        require(_tronUSDC != address(0), "Invalid TronUSDC address");
+        require(_token != address(0), "Invalid token address");
         require(_admin != address(0), "Invalid admin address");
         require(_treasury != address(0), "Invalid treasury address");
         require(_instantMintThreshold > 0, "Instant mint threshold must be greater than 0");
@@ -114,7 +114,7 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         _grantRole(PAUSER_ROLE, _admin);
 
         USDCControllerStorage storage $ = _getUSDCControllerStorage();
-        $.token = IUSDC(_tronUSDC);
+        $.token = IUSDC(_token);
 
         $.instantMintThreshold = _instantMintThreshold;
         $.ratifiedMintThreshold = _ratifiedMintThreshold;
