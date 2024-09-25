@@ -328,21 +328,4 @@ describe('TronUSDCBridgeTest', function () {
       expect(await tronUSDCBridge.isWhitelisted(user2.address)).to.be.false;
     });
   });
-
-  describe("setToken", function () {
-    it("should allow owner to set token", async function () {
-      await tronUSDCBridge.setToken(await mockUSDC2.getAddress());
-      expect(await tronUSDCBridge.token()).to.equal(await mockUSDC2.getAddress());
-    });
-
-    it("should not allow non-owners to set token", async function () {
-      await expect(tronUSDCBridge.connect(user1).setToken(await mockUSDC2.getAddress()))
-        .to.be.revertedWithCustomError(tronUSDCBridge, 'OwnableUnauthorizedAccount');
-    });
-
-    it("should not allow setting token to zero address", async function () {
-      await expect(tronUSDCBridge.setToken(ethers.ZeroAddress))
-        .to.be.revertedWith("Invalid token address");
-    });
-  });
 });

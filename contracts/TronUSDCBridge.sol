@@ -71,12 +71,6 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
         return $.token;
     }
 
-    function setToken(address _newToken) external onlyOwner {
-        require(_newToken != address(0), "Invalid token address");
-        BridgeStorage storage $ = _getBridgeStorage();
-        $.token = IERC20(_newToken);
-    }
-
     function deposit(uint256 amount, string calldata targetTronAddress) external
     nonReentrant
     whenNotPaused

@@ -134,6 +134,28 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         emit TreasurySet(address(0), _treasury);
     }
 
+    function acceptDefaultAdminTransfer() override public {
+        (address newDefaultAdmin,) = pendingDefaultAdmin();
+        if (_msgSender() != newDefaultAdmin) {
+            // Enforce newDefaultAdmin explicit acceptance.
+            revert AccessControlInvalidDefaultAdmin(_msgSender());
+        }
+
+        // revoke all roles from old admin
+        _revokeRole(SYSTEM_OPERATOR_ROLE, defaultAdmin());
+        _revokeRole(MINT_RATIFIER_ROLE, defaultAdmin());
+        _revokeRole(ACCESS_MANAGER_ROLE, defaultAdmin());
+        _revokeRole(PAUSER_ROLE, defaultAdmin());
+
+        // grant all roles to new admin
+        _grantRole(SYSTEM_OPERATOR_ROLE, newDefaultAdmin);
+        _grantRole(MINT_RATIFIER_ROLE, newDefaultAdmin);
+        _grantRole(ACCESS_MANAGER_ROLE, newDefaultAdmin);
+        _grantRole(PAUSER_ROLE, newDefaultAdmin);
+
+        _acceptDefaultAdminTransfer();
+    }
+
     function pauseToken() external onlyRole(PAUSER_ROLE) {
         token().pause();
     }
@@ -505,5 +527,9 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
 
     function getMintReqInvalidBeforeThisBlock() public view returns (uint256) {
         return _getUSDCControllerStorage().mintReqInvalidBeforeThisBlock;
+    }
+
+    function getRatifiedPoolRefillApprovals() public view returns (address[2] memory) {
+        return _getUSDCControllerStorage().ratifiedPoolRefillApprovals;
     }
 }

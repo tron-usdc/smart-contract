@@ -1,5 +1,6 @@
 const {expect} = require("chai");
 const {ethers, upgrades} = require("hardhat");
+const net = require("node:net");
 
 describe('TronUSDCBridgeControllerTest', function () {
   let TronUSDCBridgeController, controller, TronUSDCBridge, tronUsdcBridge, MockUSDC, mockUSDC;
@@ -13,6 +14,7 @@ describe('TronUSDCBridgeControllerTest', function () {
   const targetTronAddress = "TE7nS8MkeR2p7quxUvjaGQLd5YtkXBTCfc";
   const tronBurnTx = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   const USDC_DECIMALS = 6;
+  const FEE_RATE = 1000n;
 
   beforeEach(async function () {
     [owner, user1, user2, systemOperator, withdrawRatifier1, withdrawRatifier2, withdrawRatifier3, whitelistManager, treasurer, fundManager] = await ethers.getSigners();
@@ -39,7 +41,7 @@ describe('TronUSDCBridgeControllerTest', function () {
       ethers.parseUnits("1000", 6), // instantWithdrawThreshold
       ethers.parseUnits("10000", 6), // ratifiedWithdrawThreshold
       ethers.parseUnits("100000", 6), // multiSigWithdrawThreshold
-      1000, // feeRate (0.1%)
+      FEE_RATE, // feeRate (0.1%)
       treasurer.address
     ]);
     await controller.waitForDeployment();
@@ -106,12 +108,12 @@ describe('TronUSDCBridgeControllerTest', function () {
 
     it("should allow system operator to perform instant withdraw", async function () {
       const withdrawAmount = ethers.parseUnits("100", 6);
-      const fee = withdrawAmount * 1000n / 1000000n;
+      const fee = withdrawAmount * FEE_RATE / 1000000n;
       const netWithdrawAmount = withdrawAmount - fee;
 
       await expect(controller.connect(systemOperator).instantWithdraw(user1.address, withdrawAmount, tronBurnTx))
         .to.emit(controller, "InstantWithdraw")
-        .withArgs(user1.address, withdrawAmount, tronBurnTx);
+        .withArgs(user1.address, netWithdrawAmount, tronBurnTx);
 
       expect(await mockUSDC.balanceOf(user1.address)).to.equal(ethers.parseUnits("1000000", 6) - depositAmount + netWithdrawAmount);
       expect(await mockUSDC.balanceOf(treasurer.address)).to.equal(fee);
@@ -156,18 +158,26 @@ describe('TronUSDCBridgeControllerTest', function () {
     });
 
     it("should allow admin to finalize withdraw without ratification", async function () {
+      let withdrawAmount = ethers.parseUnits("5000", 6);
+      let fee = withdrawAmount * FEE_RATE / 1000000n;
+      let netWithdrawAmount = withdrawAmount - fee;
+
       await expect(controller.connect(owner).finalizeWithdraw(0))
         .to.emit(controller, "WithdrawFinalized")
-        .withArgs(user1.address, ethers.parseUnits("5000", 6), tronBurnTx, 0);
+        .withArgs(user1.address, netWithdrawAmount, tronBurnTx, 0);
     });
 
     it("should require ratification for non-admin to finalize withdraw", async function () {
       await expect(controller.connect(systemOperator).finalizeWithdraw(0))
         .to.be.revertedWith("Not enough approvals");
 
+      let withdrawAmount = ethers.parseUnits("5000", 6);
+      let fee = withdrawAmount * FEE_RATE / 1000000n;
+      let netWithdrawAmount = withdrawAmount - fee;
+
       await expect(controller.connect(withdrawRatifier1).ratifyWithdraw(0, user1.address, ethers.parseUnits("5000", 6), tronBurnTx))
         .to.emit(controller, "WithdrawFinalized")
-        .withArgs(user1.address, ethers.parseUnits("5000", 6), tronBurnTx, 0);
+        .withArgs(user1.address, netWithdrawAmount, tronBurnTx, 0);
     });
   });
 
@@ -263,16 +273,18 @@ describe('TronUSDCBridgeControllerTest', function () {
       await controller.connect(withdrawRatifier2).ratifyWithdraw(withdrawIndex, user1.address, largeWithdrawAmount, tronBurnTx);
 
       // The last ratification should trigger finalization
+      let netLargeWithdrawAmount = largeWithdrawAmount - (largeWithdrawAmount * FEE_RATE / 1000000n);
       await expect(controller.connect(withdrawRatifier3).ratifyWithdraw(withdrawIndex, user1.address, largeWithdrawAmount, tronBurnTx))
         .to.emit(controller, "WithdrawFinalized")
-        .withArgs(user1.address, largeWithdrawAmount, tronBurnTx, withdrawIndex);
+        .withArgs(user1.address, netLargeWithdrawAmount, tronBurnTx, withdrawIndex);
     });
 
     it("should allow admin to bypass multi-signature requirement", async function () {
       await controller.connect(systemOperator).requestWithdraw(user1.address, largeWithdrawAmount, tronBurnTx);
+      let netLargeWithdrawAmount = largeWithdrawAmount - (largeWithdrawAmount * FEE_RATE / 1000000n);
       await expect(controller.connect(owner).finalizeWithdraw(0))
         .to.emit(controller, "WithdrawFinalized")
-        .withArgs(user1.address, largeWithdrawAmount, tronBurnTx, 0);
+        .withArgs(user1.address, netLargeWithdrawAmount, tronBurnTx, 0);
     });
 
     it("should not allow the same ratifier to approve twice", async function () {

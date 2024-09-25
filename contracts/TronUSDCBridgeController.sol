@@ -118,6 +118,30 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         emit TreasurySet(address(0), _treasury);
     }
 
+    function acceptDefaultAdminTransfer() override public {
+        (address newDefaultAdmin,) = pendingDefaultAdmin();
+        if (_msgSender() != newDefaultAdmin) {
+            // Enforce newDefaultAdmin explicit acceptance.
+            revert AccessControlInvalidDefaultAdmin(_msgSender());
+        }
+
+        // revoke all roles from old admin
+        _revokeRole(SYSTEM_OPERATOR_ROLE, defaultAdmin());
+        _revokeRole(WITHDRAW_RATIFIER_ROLE, defaultAdmin());
+        _revokeRole(ACCESS_MANAGER_ROLE, defaultAdmin());
+        _revokeRole(PAUSER_ROLE, defaultAdmin());
+        _revokeRole(FUND_MANAGER_ROLE, defaultAdmin());
+
+        // grant all roles to new admin
+        _grantRole(SYSTEM_OPERATOR_ROLE, newDefaultAdmin);
+        _grantRole(WITHDRAW_RATIFIER_ROLE, newDefaultAdmin);
+        _grantRole(ACCESS_MANAGER_ROLE, newDefaultAdmin);
+        _grantRole(PAUSER_ROLE, newDefaultAdmin);
+        _grantRole(FUND_MANAGER_ROLE, newDefaultAdmin);
+
+        _acceptDefaultAdminTransfer();
+    }
+
     function pauseBridge() external onlyRole(PAUSER_ROLE) {
         bridge().pause();
     }
@@ -234,7 +258,7 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         uint256 withdrawAmount = _value - fee;
 
         $.bridge.withdraw(_to, withdrawAmount);
-        emit InstantWithdraw(_to, _value, _tronBurnTx);
+        emit InstantWithdraw(_to, withdrawAmount, _tronBurnTx);
 
         if (fee > 0 && $.treasury != address(0)) {
             $.bridge.withdraw($.treasury, fee);
@@ -277,7 +301,7 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
 
         delete $.withdrawOperations[_index];
         $.bridge.withdraw(to, withdrawAmount);
-        emit WithdrawFinalized(to, value, tronBurnTx, _index);
+        emit WithdrawFinalized(to, withdrawAmount, tronBurnTx, _index);
 
         if (fee > 0 && $.treasury != address(0)) {
             $.bridge.withdraw($.treasury, fee);
@@ -398,6 +422,10 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
 
     function getTreasury() public view returns (address) {
         return _getTronUSDCBridgeControllerStorage().treasury;
+    }
+
+    function getInvestmentAddress() public view returns (address) {
+        return _getTronUSDCBridgeControllerStorage().investmentAddress;
     }
 
     function getWithdrawOperation(uint256 index) public view returns (WithdrawOperationView memory) {
