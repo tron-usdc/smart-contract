@@ -12,7 +12,7 @@ interface IUSDC {
 
     function setWhitelistEnabled(bool enabled) external;
 
-    function updateBurnMinAmount(uint256 amount) external;
+    function updateBurnMinAmount(uint248 amount) external;
 
     function updateWhitelist(address user, bool status) external;
 
@@ -22,9 +22,11 @@ interface IUSDC {
 
     function unpause() external;
 
-    function reclaimToken(IERC20 token, address _to) external;
-
     function acceptOwnership() external;
 
     function transferOwnership(address newOwner) external;
+
+    function reclaimToken(IERC20 token, address _to) external;
+
+    function reclaimTRX(address payable _to) external;
 }

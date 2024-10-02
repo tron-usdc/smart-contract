@@ -6,7 +6,6 @@ describe('TronUSDCBridgeTest', function () {
   let owner, user1, user2, user3;
   const USDC_DECIMALS = 6;
   const targetTronAddress = "TE7nS8MkeR2p7quxUvjaGQLd5YtkXBTCfc";
-  const invalidTargetTronTddress = "InvalidAddress";
 
   beforeEach(async function () {
     [owner, user1, user2, user3] = await ethers.getSigners();
@@ -84,12 +83,6 @@ describe('TronUSDCBridgeTest', function () {
         .to.be.revertedWith("Amount below minimum transfer amount");
     });
 
-    it("should reject invalid Tron address length", async function () {
-      const depositAmount = ethers.parseUnits("1000", USDC_DECIMALS);
-      await expect(tronUSDCBridge.connect(user1).deposit(depositAmount, invalidTargetTronTddress))
-        .to.be.revertedWith("Invalid Tron address length");
-    });
-
     it("should update total deposited amount correctly", async function () {
       const depositAmount = ethers.parseUnits("1000", USDC_DECIMALS);
       const initialTotalDeposited = await tronUSDCBridge.getTotalDeposited();
@@ -107,13 +100,24 @@ describe('TronUSDCBridgeTest', function () {
       await expect(tronUSDCBridge.connect(user2).deposit(depositAmount, targetTronAddress))
         .to.not.be.reverted;
     });
-
   });
 
   describe("Withdraw", function () {
     beforeEach(async function () {
       await tronUSDCBridge.updateWhitelist(user1.address, true);
       await tronUSDCBridge.connect(user1).deposit(ethers.parseUnits("1000", USDC_DECIMALS), targetTronAddress);
+    });
+
+    it("should reject deposit with invalid Tron address", async function () {
+      const invalidTronAddress = "invalidAddress";
+      const tronZeroAddress = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb";
+
+      const depositAmount = ethers.parseUnits("1000", USDC_DECIMALS);
+      await expect(tronUSDCBridge.connect(user1).deposit(depositAmount, invalidTronAddress))
+        .to.be.revertedWith("Invalid Tron address");
+
+      await expect(tronUSDCBridge.connect(user1).deposit(depositAmount, tronZeroAddress))
+        .to.be.revertedWith("Invalid Tron address");
     });
 
     it("should allow owner to withdraw and update balances correctly", async function () {

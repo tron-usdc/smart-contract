@@ -1,25 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {AddressValidator} from "./library/AddressValidator.sol";
 
 contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
     using SafeERC20 for IERC20;
-    uint256 public constant USDC_DECIMALS = 6;
+    using AddressValidator for string;
 
     /// @custom:storage-location erc7201:openzeppelin.storage.USDCStakingBridge
     struct BridgeStorage {
         IERC20 token;
+        bool whitelistEnabled;
         mapping(address => bool) whitelist;
         uint256 totalDeposited;
         uint256 minDepositAmount;
-        bool whitelistEnabled;
     }
 
     // keccak256(abi.encode(uint256(keccak256("TronUSDC.storage.TronUSDCBridge")) - 1)) & ~bytes32(uint256(0xff))
@@ -45,7 +46,7 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
     ) public initializer {
         require(_token != address(0), "Invalid token address");
         require(owner != address(0), "Invalid owner address");
-        require(_minDepositAmount > 0, "Minimum deposit amount must be greater than 0");
+        require(_minDepositAmount != 0, "Minimum deposit amount must be greater than 0");
 
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -72,10 +73,12 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
     }
 
     function deposit(uint256 amount, string calldata targetTronAddress) external
-    nonReentrant
     whenNotPaused
     onlyWhitelisted(_msgSender())
+    nonReentrant
     {
+        require(targetTronAddress.isValidTronAddress(), "Invalid Tron address");
+
         BridgeStorage storage $ = _getBridgeStorage();
         require(amount >= $.minDepositAmount, "Amount below minimum transfer amount");
         require(bytes(targetTronAddress).length == 34, "Invalid Tron address length");
@@ -85,7 +88,7 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
         emit Deposited(_msgSender(), amount, targetTronAddress);
     }
 
-    function withdraw(address user, uint256 amount) external nonReentrant whenNotPaused onlyOwner {
+    function withdraw(address user, uint256 amount) external whenNotPaused onlyOwner nonReentrant {
         BridgeStorage storage $ = _getBridgeStorage();
         require(user != address(0), "Invalid recipient address");
         require(amount <= USDCBalance(), "Insufficient USDC balance");
@@ -96,6 +99,7 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
     }
 
     function setMinDepositAmount(uint256 amount) external onlyOwner {
+        require(amount != 0, "Amount must be greater than 0");
         BridgeStorage storage $ = _getBridgeStorage();
         uint256 oldAmount = $.minDepositAmount;
         $.minDepositAmount = amount;
@@ -114,9 +118,9 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
         emit WhitelistUpdated(user, status);
     }
 
-    function transferUSDC(address to, uint256 amount) external onlyOwner {
+    function transferUSDC(address to, uint256 amount) external onlyOwner nonReentrant {
         require(to != address(0), "Invalid recipient address");
-        require(amount > 0, "Amount must be greater than 0");
+        require(amount != 0, "Amount must be greater than 0");
         require(amount <= USDCBalance(), "Insufficient USDC balance");
 
         token().safeTransfer(to, amount);
@@ -159,7 +163,7 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
     * @dev send all eth balance in the contract to another address
      * @param _to address to send eth balance to
      */
-    function reclaimEther(address payable _to) external onlyOwner {
+    function reclaimEther(address payable _to) external onlyOwner nonReentrant {
         require(_to != address(0), "Invalid address");
         uint256 balance = address(this).balance;
         (bool success,) = _to.call{value: balance}("");
@@ -172,7 +176,7 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
      * @param _token token to reclaim
      * @param _to address to send eth balance to
      */
-    function reclaimToken(IERC20 _token, address _to) external onlyOwner {
+    function reclaimToken(IERC20 _token, address _to) external onlyOwner nonReentrant {
         require(_to != address(0), "Invalid address");
         require(address(_token) != address(token()), "Cannot reclaim USDC");
         uint256 balance = _token.balanceOf(address(this));

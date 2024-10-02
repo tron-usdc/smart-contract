@@ -2,14 +2,18 @@
 pragma solidity ^0.8.0;
 
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/extensions/AccessControlDefaultAdminRulesUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {ITronUSDCBridge} from "./interface/ITronUSDCBridge.sol";
+import {TransactionValidator} from "./library/TransactionValidator.sol";
 
 contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessControlDefaultAdminRulesUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
+    using SafeERC20 for IERC20;
+    using TransactionValidator for string;
     bytes32 public constant SYSTEM_OPERATOR_ROLE = keccak256("SYSTEM_OPERATOR_ROLE");
     bytes32 public constant WITHDRAW_RATIFIER_ROLE = keccak256("WITHDRAW_RATIFIER_ROLE");
     bytes32 public constant ACCESS_MANAGER_ROLE = keccak256("ACCESS_MANAGER_ROLE");
@@ -23,21 +27,21 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
 
     struct WithdrawOperation {
         address to;
+        bool paused;
         uint256 value;
         string tronBurnTx;
         uint256 requestedBlock;
         uint256 numberOfApproval;
-        bool paused;
         mapping(address => bool) approved;
     }
 
     struct WithdrawOperationView {
         address to;
+        bool paused;
         uint256 value;
         string tronBurnTx;
         uint256 requestedBlock;
         uint256 numberOfApproval;
-        bool paused;
     }
 
     /// @custom:storage-location erc7201:openzeppelin.storage.USDCStakingController
@@ -48,7 +52,6 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         uint256 ratifiedWithdrawThreshold;
         uint256 multiSigWithdrawThreshold;
         uint256 withdrawReqInvalidBeforeThisBlock;
-        address vaultAddress;
         address investmentAddress;
         address treasury;
         uint256 feeRate; // Expressed in basis points, for example, 10000 means 1%.
@@ -74,6 +77,7 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
     event FeePaid(address indexed to, uint256 amount);
     event TreasurySet(address indexed oldTreasury, address indexed newTreasury);
     event FeeRateSet(uint256 oldFeeRate, uint256 newFeeRate);
+    event WithdrawThresholdChanged(uint256 instant, uint256 ratified, uint256 multiSig);
 
     error InvalidOperation();
 
@@ -82,17 +86,13 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         address _admin,
         uint256 _instantWithdrawThreshold,
         uint256 _ratifiedWithdrawThreshold,
-        uint256 _multiSigWithdrawThreshold,
-        uint256 _feeRate,
-        address _treasury
+        uint256 _multiSigWithdrawThreshold
     ) public initializer {
         require(_bridge != address(0), "Bridge address cannot be zero");
         require(_admin != address(0), "Admin address cannot be zero");
-        require(_instantWithdrawThreshold > 0, "Instant withdraw threshold must be positive");
+        require(_instantWithdrawThreshold != 0, "Invalid instant threshold");
         require(_ratifiedWithdrawThreshold > _instantWithdrawThreshold, "Ratified threshold must be greater than instant threshold");
         require(_multiSigWithdrawThreshold > _ratifiedWithdrawThreshold, "MultiSig threshold must be greater than ratified threshold");
-        require(_feeRate <= FEE_DENOMINATOR, "Invalid fee rate");
-        require(_treasury != address(0), "Treasury cannot be zero address");
 
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -110,12 +110,6 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         $.instantWithdrawThreshold = _instantWithdrawThreshold;
         $.ratifiedWithdrawThreshold = _ratifiedWithdrawThreshold;
         $.multiSigWithdrawThreshold = _multiSigWithdrawThreshold;
-
-        $.feeRate = _feeRate;
-        $.treasury = _treasury;
-
-        emit FeeRateSet(0, _feeRate);
-        emit TreasurySet(address(0), _treasury);
     }
 
     function acceptDefaultAdminTransfer() override public {
@@ -132,21 +126,20 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         _revokeRole(PAUSER_ROLE, defaultAdmin());
         _revokeRole(FUND_MANAGER_ROLE, defaultAdmin());
 
+        _acceptDefaultAdminTransfer();
         // grant all roles to new admin
         _grantRole(SYSTEM_OPERATOR_ROLE, newDefaultAdmin);
         _grantRole(WITHDRAW_RATIFIER_ROLE, newDefaultAdmin);
         _grantRole(ACCESS_MANAGER_ROLE, newDefaultAdmin);
         _grantRole(PAUSER_ROLE, newDefaultAdmin);
         _grantRole(FUND_MANAGER_ROLE, newDefaultAdmin);
-
-        _acceptDefaultAdminTransfer();
     }
 
     function pauseBridge() external onlyRole(PAUSER_ROLE) {
         bridge().pause();
     }
 
-    function unpauseBridge() external onlyRole(PAUSER_ROLE) {
+    function unpauseBridge() external onlyRole(DEFAULT_ADMIN_ROLE) {
         bridge().unpause();
     }
 
@@ -172,32 +165,32 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
 
     function transferToInvestment(uint256 amount) external onlyRole(FUND_MANAGER_ROLE) {
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
-        require(amount > 0, "Amount must be greater than 0");
+        require(amount != 0, "Amount must be greater than 0");
         require($.investmentAddress != address(0), "Investment address not set");
 
         $.bridge.transferUSDC($.investmentAddress, amount);
         emit FundsTransferredToInvestment(amount);
     }
 
-    function reclaimEtherFromBridge() external onlyRole(DEFAULT_ADMIN_ROLE) {
-        bridge().reclaimEther(payable(_msgSender()));
+    function reclaimEtherFromBridge(address payable _to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        bridge().reclaimEther(_to);
     }
 
     function reclaimTokenFromBridge(IERC20 _token) external onlyRole(DEFAULT_ADMIN_ROLE) {
         bridge().reclaimToken(_token, _msgSender());
     }
 
-    function reclaimEther(address payable _to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function reclaimEther(address payable _to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         require(_to != address(0), "Invalid address");
         uint256 balance = address(this).balance;
         (bool success,) = _to.call{value: balance}("");
         require(success, "Transfer failed");
     }
 
-    function reclaimToken(IERC20 _token, address _to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function reclaimToken(IERC20 _token, address _to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         require(_to != address(0), "Invalid address");
         uint256 balance = _token.balanceOf(address(this));
-        _token.transfer(_to, balance);
+        _token.safeTransfer(_to, balance);
     }
 
     function setTreasury(address _treasurer) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -211,6 +204,9 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
     function setFeeRate(uint256 _feeRate) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(_feeRate <= FEE_DENOMINATOR, "Invalid fee rate");
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
+        if (_feeRate != 0) {
+            require($.treasury != address(0), "Treasury address not set");
+        }
         uint256 oldFeeRate = $.feeRate;
         $.feeRate = _feeRate;
         emit FeeRateSet(oldFeeRate, _feeRate);
@@ -232,7 +228,9 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
 
     function _requestWithdraw(address _to, uint256 _value, string calldata _tronBurnTx) internal {
         require(_to != address(0), "Invalid address");
-        require(bytes(_tronBurnTx).length == 64, "Invalid Tron burn tx");
+        require(_value != 0, "Invalid amount");
+        require(_tronBurnTx.isValidTronTxHash(), "Invalid Tron burn tx");
+
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
         WithdrawOperation storage op = $.withdrawOperations.push();
         op.to = _to;
@@ -249,18 +247,19 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
     whenNotPaused
     onlyRole(SYSTEM_OPERATOR_ROLE)
     {
-        TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
         require(_to != address(0), "Invalid address");
-        require(bytes(_tronBurnTx).length == 64, "Invalid Tron burn tx");
-        require(_value <= $.instantWithdrawThreshold, "Over the instant withdraw threshold");
+        require(_value != 0, "Invalid amount");
+        require(_tronBurnTx.isValidTronTxHash(), "Invalid Tron burn tx");
 
+        TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
+        require(_value <= $.instantWithdrawThreshold, "Over the instant withdraw threshold");
         uint256 fee = (_value * $.feeRate) / FEE_DENOMINATOR;
         uint256 withdrawAmount = _value - fee;
 
         $.bridge.withdraw(_to, withdrawAmount);
         emit InstantWithdraw(_to, withdrawAmount, _tronBurnTx);
 
-        if (fee > 0 && $.treasury != address(0)) {
+        if (fee != 0) {
             $.bridge.withdraw($.treasury, fee);
             emit FeePaid($.treasury, fee);
         }
@@ -271,12 +270,17 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
     whenNotPaused
     onlyRole(WITHDRAW_RATIFIER_ROLE)
     {
+        require(_to != address(0), "Invalid address");
+        require(_value != 0, "Invalid amount");
+        require(_tronBurnTx.isValidTronTxHash(), "Invalid Tron burn tx");
+
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
         WithdrawOperation storage op = $.withdrawOperations[_index];
         require(op.to == _to, "To address does not match");
         require(op.value == _value, "Amount does not match");
         require(keccak256(bytes(op.tronBurnTx)) == keccak256(bytes(_tronBurnTx)), "Tron burn tx does not match");
         require(!op.approved[_msgSender()], "Already approved");
+
         op.approved[_msgSender()] = true;
         op.numberOfApproval += 1;
         emit WithdrawRatified(_index, _msgSender());
@@ -290,6 +294,7 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         WithdrawOperation storage op = $.withdrawOperations[_index];
 
         address to = op.to;
+        require(to != address(0), "Invalid address");
         uint256 value = op.value;
         string memory tronBurnTx = op.tronBurnTx;
         if (!hasRole(DEFAULT_ADMIN_ROLE, _msgSender())) {
@@ -303,7 +308,7 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         $.bridge.withdraw(to, withdrawAmount);
         emit WithdrawFinalized(to, withdrawAmount, tronBurnTx, _index);
 
-        if (fee > 0 && $.treasury != address(0)) {
+        if (fee != 0) {
             $.bridge.withdraw($.treasury, fee);
             emit FeePaid($.treasury, fee);
         }
@@ -354,13 +359,13 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         emit WithdrawRevoked(_index);
     }
 
-    function pauseWithdraw(uint256 _opIndex) external onlyRole(SYSTEM_OPERATOR_ROLE) {
+    function pauseWithdraw(uint256 _opIndex) external onlyRole(PAUSER_ROLE) {
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
         $.withdrawOperations[_opIndex].paused = true;
         emit WithdrawPaused(_opIndex, true);
     }
 
-    function unpauseWithdraw(uint256 _opIndex) external onlyRole(SYSTEM_OPERATOR_ROLE) {
+    function unpauseWithdraw(uint256 _opIndex) external onlyRole(DEFAULT_ADMIN_ROLE) {
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
         $.withdrawOperations[_opIndex].paused = false;
         emit WithdrawPaused(_opIndex, false);
@@ -372,11 +377,14 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
     }
 
     function setWithdrawThresholds(uint256 _instant, uint256 _ratified, uint256 _multiSig) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_instant != 0, "Invalid instant threshold");
         require(_instant <= _ratified && _ratified <= _multiSig, "Invalid thresholds");
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
         $.instantWithdrawThreshold = _instant;
         $.ratifiedWithdrawThreshold = _ratified;
         $.multiSigWithdrawThreshold = _multiSig;
+
+        emit WithdrawThresholdChanged(_instant, _ratified, _multiSig);
     }
 
     function invalidateAllPendingWithdraws() external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -388,7 +396,7 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         _pause();
     }
 
-    function unpause() external onlyRole(PAUSER_ROLE) {
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
     }
 
@@ -399,10 +407,6 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
 
     function claimBridgeOwnership() external onlyRole(DEFAULT_ADMIN_ROLE) {
         bridge().acceptOwnership();
-    }
-
-    function setBridgeToken(address _newToken) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        bridge().setToken(_newToken);
     }
 
     function bridge() public view returns (ITronUSDCBridge) {

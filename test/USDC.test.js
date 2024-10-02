@@ -66,6 +66,18 @@ describe('USDCTest', function () {
       await usdc.connect(owner).updateWhitelist(user1.address, true);
     });
 
+    it("should reject burn with invalid Ethereum address", async function () {
+      const invalidEthAddress = "0xinvalidAddress";
+      const ethZeroAddress = "0x0000000000000000000000000000000000000000";
+
+      const burnAmount = ethers.parseUnits("100", 6);
+      await expect(usdc.connect(user1).burn(burnAmount, invalidEthAddress))
+        .to.be.revertedWith("Invalid target eth address");
+
+      await expect(usdc.connect(user1).burn(burnAmount, ethZeroAddress))
+        .to.be.revertedWith("Invalid target eth address");
+    });
+
     it("should allow whitelisted users to burn tokens", async function () {
       const burnAmount = ethers.parseUnits("100", 6);
       const targetEthAddress = "0x1234567890123456789012345678901234567890";

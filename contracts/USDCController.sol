@@ -2,14 +2,18 @@
 pragma solidity ^0.8.0;
 
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/extensions/AccessControlDefaultAdminRulesUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {IUSDC} from "./interface/IUSDC.sol";
+import {TransactionValidator} from "./library/TransactionValidator.sol";
 
 contract USDCController is Initializable, ContextUpgradeable, AccessControlDefaultAdminRulesUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
+    using SafeERC20 for IERC20;
+    using TransactionValidator for string;
     bytes32 public constant SYSTEM_OPERATOR_ROLE = keccak256("SYSTEM_OPERATOR_ROLE");
     bytes32 public constant MINT_RATIFIER_ROLE = keccak256("MINT_RATIFIER_ROLE");
     bytes32 public constant ACCESS_MANAGER_ROLE = keccak256("ACCESS_MANAGER_ROLE");
@@ -22,21 +26,21 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
 
     struct MintOperation {
         address to;
+        bool paused;
         uint256 value;
         uint256 requestedBlock;
         uint256 numberOfApproval;
-        bool paused;
         string ethDepositTx;
         mapping(address => bool) approved;
     }
 
     struct MintOperationView {
         address to;
+        bool paused;
         uint256 value;
         uint256 requestedBlock;
         uint256 numberOfApproval;
         string ethDepositTx;
-        bool paused;
     }
 
     /// @custom:storage-location erc7201:openzeppelin.storage.TronUSDCController
@@ -56,7 +60,6 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         address[2] ratifiedPoolRefillApprovals;
         address treasury;
         uint256 feeRate; // Expressed in basis points, for example, 10000 means 1%.
-
     }
 
     // keccak256(abi.encode(uint256(keccak256("TronUSDC.storage.USDCController")) - 1)) & ~bytes32(uint256(0xff))
@@ -78,6 +81,8 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
     event FeePaid(address indexed to, uint256 amount);
     event TreasurySet(address indexed oldTreasury, address indexed newTreasury);
     event FeeRateSet(uint256 oldFeeRate, uint256 newFeeRate);
+    event MintThresholdChanged(uint256 instant, uint256 ratified, uint256 multiSig);
+    event MintLimitsChanged(uint256 instant, uint256 ratified, uint256 multiSig);
 
     error InvalidOperation();
 
@@ -89,20 +94,21 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         uint256 _multiSigMintThreshold,
         uint256 _instantMintLimit,
         uint256 _ratifiedMintLimit,
-        uint256 _multiSigMintLimit,
-        uint256 _feeRate,
-        address _treasury
+        uint256 _multiSigMintLimit
     ) public initializer {
         require(_token != address(0), "Invalid token address");
         require(_admin != address(0), "Invalid admin address");
-        require(_treasury != address(0), "Invalid treasury address");
-        require(_instantMintThreshold > 0, "Instant mint threshold must be greater than 0");
+        require(_instantMintThreshold != 0, "Instant mint threshold must be greater than 0");
         require(_ratifiedMintThreshold > _instantMintThreshold, "Ratified mint threshold must be greater than instant mint threshold");
         require(_multiSigMintThreshold > _ratifiedMintThreshold, "Multi-sig mint threshold must be greater than ratified mint threshold");
-        require(_instantMintLimit > 0, "Instant mint limit must be greater than 0");
+
+        require(_instantMintLimit >= _instantMintThreshold, "Instant mint limit must be greater than or equal to instant mint threshold");
+        require(_ratifiedMintLimit >= _ratifiedMintThreshold, "Ratified mint limit must be greater than or equal to ratified mint threshold");
+        require(_multiSigMintLimit >= _multiSigMintThreshold, "Multi-sig mint limit must be greater than or equal to multi-sig mint threshold");
+
+        require(_instantMintLimit != 0, "Instant mint limit must be greater than 0");
         require(_ratifiedMintLimit > _instantMintLimit, "Ratified mint limit must be greater than instant mint limit");
         require(_multiSigMintLimit > _ratifiedMintLimit, "Multi-sig mint limit must be greater than ratified mint limit");
-        require(_feeRate <= FEE_DENOMINATOR, "Invalid fee rate");
 
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -127,11 +133,6 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         $.instantMintPool = _instantMintLimit;
         $.ratifiedMintPool = _ratifiedMintLimit;
         $.multiSigMintPool = _multiSigMintLimit;
-
-        $.feeRate = _feeRate;
-        $.treasury = _treasury;
-        emit FeeRateSet(0, _feeRate);
-        emit TreasurySet(address(0), _treasury);
     }
 
     function acceptDefaultAdminTransfer() override public {
@@ -147,20 +148,19 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         _revokeRole(ACCESS_MANAGER_ROLE, defaultAdmin());
         _revokeRole(PAUSER_ROLE, defaultAdmin());
 
+        _acceptDefaultAdminTransfer();
         // grant all roles to new admin
         _grantRole(SYSTEM_OPERATOR_ROLE, newDefaultAdmin);
         _grantRole(MINT_RATIFIER_ROLE, newDefaultAdmin);
         _grantRole(ACCESS_MANAGER_ROLE, newDefaultAdmin);
         _grantRole(PAUSER_ROLE, newDefaultAdmin);
-
-        _acceptDefaultAdminTransfer();
     }
 
     function pauseToken() external onlyRole(PAUSER_ROLE) {
         token().pause();
     }
 
-    function unpauseToken() external onlyRole(PAUSER_ROLE) {
+    function unpauseToken() external onlyRole(DEFAULT_ADMIN_ROLE) {
         token().unpause();
     }
 
@@ -172,7 +172,7 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         token().unblacklist(account);
     }
 
-    function updateBurnMinAmount(uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function updateBurnMinAmount(uint248 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
         token().updateBurnMinAmount(amount);
     }
 
@@ -192,10 +192,22 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         token().reclaimToken(_token, _msgSender());
     }
 
-    function reclaimToken(IERC20 _token, address _to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function reclaimTRXFromUSDC(address payable _to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        token().reclaimTRX(_to);
+    }
+
+    function reclaimToken(IERC20 _token, address _to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         require(_to != address(0), "Invalid recipient address");
         uint256 balance = _token.balanceOf(address(this));
-        _token.transfer(_to, balance);
+        _token.safeTransfer(_to, balance);
+    }
+
+    function reclaimTRX(address payable _to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        require(_to != address(0), "Invalid address");
+        uint256 balance = address(this).balance;
+        require(balance != 0, "No TRX balance to reclaim");
+
+        _to.transfer(balance);
     }
 
     function setTreasury(address _treasury) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -209,6 +221,9 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
     function setFeeRate(uint256 _feeRate) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(_feeRate <= FEE_DENOMINATOR, "Invalid fee rate");
         USDCControllerStorage storage $ = _getUSDCControllerStorage();
+        if (_feeRate != 0) {
+            require($.treasury != address(0), "Treasury address is not set");
+        }
         uint256 oldFeeRate = $.feeRate;
         $.feeRate = _feeRate;
         emit FeeRateSet(oldFeeRate, _feeRate);
@@ -224,6 +239,8 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
 
     function _requestMint(address _to, uint256 _value, string calldata ethDepositTx) internal {
         require(_to != address(0), "Invalid address");
+        require(_value != 0, "Invalid value");
+        require(ethDepositTx.isValidEthTxHash(), "Invalid eth deposit tx");
 
         USDCControllerStorage storage $ = _getUSDCControllerStorage();
         MintOperation storage op = $.mintOperations.push();
@@ -237,6 +254,10 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
     }
 
     function ownerMint(address _to, uint256 _value, string calldata ethDepositTx) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_to != address(0), "Invalid address");
+        require(_value != 0, "Invalid value");
+        require(ethDepositTx.isValidEthTxHash(), "Invalid eth deposit tx");
+
         USDCControllerStorage storage $ = _getUSDCControllerStorage();
         _requestMint(_to, _value, ethDepositTx);
         finalizeMint($.mintOperations.length - 1);
@@ -248,6 +269,8 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
     onlyRole(SYSTEM_OPERATOR_ROLE)
     {
         require(_to != address(0), "Invalid address");
+        require(_value != 0, "Invalid value");
+        require(ethDepositTx.isValidEthTxHash(), "Invalid eth deposit tx");
 
         USDCControllerStorage storage $ = _getUSDCControllerStorage();
         require(_value <= $.instantMintThreshold, "Over the instant mint threshold");
@@ -260,7 +283,7 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         emit InstantMint(_to, mintAmount, ethDepositTx);
         $.token.mint(_to, mintAmount);
 
-        if (fee > 0 && $.treasury != address(0)) {
+        if (fee != 0) {
             $.token.mint($.treasury, fee);
             emit FeePaid($.treasury, fee);
         }
@@ -271,12 +294,17 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
     whenNotPaused
     onlyRole(MINT_RATIFIER_ROLE)
     {
+        require(_to != address(0), "Invalid address");
+        require(_value != 0, "Invalid value");
+        require(ethDepositTx.isValidEthTxHash(), "Invalid eth deposit tx");
+
         USDCControllerStorage storage $ = _getUSDCControllerStorage();
         MintOperation storage op = $.mintOperations[_index];
         require(op.to == _to, "To address does not match");
         require(op.value == _value, "Amount does not match");
         require(keccak256(bytes(op.ethDepositTx)) == keccak256(bytes(ethDepositTx)), "Eth deposit tx does not match");
         require(!op.approved[_msgSender()], "Already approved");
+
         op.approved[_msgSender()] = true;
         op.numberOfApproval += 1;
         emit MintRatified(_index, _msgSender());
@@ -290,6 +318,7 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         MintOperation storage op = $.mintOperations[_index];
 
         address to = op.to;
+        require(to != address(0), "Invalid address");
         uint256 value = op.value;
         string memory ethDepositTx = op.ethDepositTx;
         if (!hasRole(DEFAULT_ADMIN_ROLE, _msgSender())) {
@@ -304,7 +333,7 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         $.token.mint(to, mintAmount);
         emit MintFinalized(to, mintAmount, ethDepositTx, _index);
 
-        if (fee > 0 && $.treasury != address(0)) {
+        if (fee != 0) {
             $.token.mint($.treasury, fee);
             emit FeePaid($.treasury, fee);
         }
@@ -364,13 +393,13 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         emit MintRevoked(_index);
     }
 
-    function pauseMint(uint256 _opIndex) external onlyRole(SYSTEM_OPERATOR_ROLE) {
+    function pauseMint(uint256 _opIndex) external onlyRole(PAUSER_ROLE) {
         USDCControllerStorage storage $ = _getUSDCControllerStorage();
         $.mintOperations[_opIndex].paused = true;
         emit MintPaused(_opIndex, true);
     }
 
-    function unpauseMint(uint256 _opIndex) external onlyRole(SYSTEM_OPERATOR_ROLE) {
+    function unpauseMint(uint256 _opIndex) external onlyRole(DEFAULT_ADMIN_ROLE) {
         USDCControllerStorage storage $ = _getUSDCControllerStorage();
         $.mintOperations[_opIndex].paused = false;
         emit MintPaused(_opIndex, false);
@@ -382,19 +411,44 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
     }
 
     function setMintThresholds(uint256 _instant, uint256 _ratified, uint256 _multiSig) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_instant != 0, "Invalid thresholds");
         require(_instant <= _ratified && _ratified <= _multiSig, "Invalid thresholds");
         USDCControllerStorage storage $ = _getUSDCControllerStorage();
+
+        // check if the new thresholds are less than or equal to the limits
+        require(_instant <= $.instantMintLimit, "Instant mint threshold must be less than or equal to instant mint limit");
+        require(_ratified <= $.ratifiedMintLimit, "Ratified mint threshold must be less than or equal to ratified mint limit");
+        require(_multiSig <= $.multiSigMintLimit, "Multi-sig mint threshold must be less than or equal to multi-sig mint limit");
+
         $.instantMintThreshold = _instant;
         $.ratifiedMintThreshold = _ratified;
         $.multiSigMintThreshold = _multiSig;
+        emit MintThresholdChanged(_instant, _ratified, _multiSig);
     }
 
     function setMintLimits(uint256 _instant, uint256 _ratified, uint256 _multiSig) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_instant != 0, "Invalid limits");
         require(_instant <= _ratified && _ratified <= _multiSig, "Invalid limits");
         USDCControllerStorage storage $ = _getUSDCControllerStorage();
+
+        // check if the new limits are greater than or equal to the thresholds
+        require(_instant >= $.instantMintThreshold, "Instant mint limit must be greater than or equal to instant mint threshold");
+        require(_ratified >= $.ratifiedMintThreshold, "Ratified mint limit must be greater than or equal to ratified mint threshold");
+        require(_multiSig >= $.multiSigMintThreshold, "Multi-sig mint limit must be greater than or equal to multi-sig mint threshold");
+
         $.instantMintLimit = _instant;
+        if ($.instantMintPool > _instant) {
+            $.instantMintPool = _instant;
+        }
         $.ratifiedMintLimit = _ratified;
+        if ($.ratifiedMintPool > _ratified) {
+            $.ratifiedMintPool = _ratified;
+        }
         $.multiSigMintLimit = _multiSig;
+        if ($.multiSigMintPool > _multiSig) {
+            $.multiSigMintPool = _multiSig;
+        }
+        emit MintLimitsChanged(_instant, _ratified, _multiSig);
     }
 
     function refillInstantMintPool() external onlyRole(MINT_RATIFIER_ROLE) {
@@ -443,7 +497,7 @@ contract USDCController is Initializable, ContextUpgradeable, AccessControlDefau
         _pause();
     }
 
-    function unpause() external onlyRole(PAUSER_ROLE) {
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
     }
 

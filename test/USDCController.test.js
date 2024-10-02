@@ -10,6 +10,7 @@ describe('USDCControllerTest', function () {
   const PAUSER_ROLE = ethers.keccak256(ethers.toUtf8Bytes("PAUSER_ROLE"));
   const minBurnAmount = ethers.parseUnits("10", 6);
   const ethDepositTx = "0x1234567890123456789012345678901234567890123456789012345678901234";
+  const FEE_RATE = 1000n;
 
   beforeEach(async function () {
     [owner, user1, user2, systemOperator, mintRatifier1, mintRatifier2, mintRatifier3, whitelistManager, treasury] = await ethers.getSigners();
@@ -30,10 +31,12 @@ describe('USDCControllerTest', function () {
       ethers.parseUnits("10000", 6), // instantMintLimit
       ethers.parseUnits("100000", 6), // ratifiedMintLimit
       ethers.parseUnits("1000000", 6), // multiSigMintLimit
-      1000, // feeRate (0.1%)
-      treasury.address
     ]);
     await controller.waitForDeployment();
+
+    // Set fee rate and treasury
+    await controller.connect(owner).setTreasury(treasury.address);
+    await controller.connect(owner).setFeeRate(FEE_RATE);
 
     // Setup roles
     await controller.grantRole(SYSTEM_OPERATOR_ROLE, systemOperator.address);
@@ -79,9 +82,10 @@ describe('USDCControllerTest', function () {
   });
 
   describe("Instant Mint", function () {
+    const invalidEthTxHash = "1d586c0793accd97c5dd5840f6464468722aaad824514d18405db6ff2ab9a375"; // missing 0x
     it("should allow system operator to perform instant mint", async function () {
       const mintAmount = ethers.parseUnits("100", 6);
-      const fee = mintAmount * BigInt(1000) / BigInt(1000000); // 0.1% fee
+      const fee = mintAmount * FEE_RATE / 1000000n; // 0.1% fee
       const actualMintAmount = mintAmount - fee;
 
       await expect(controller.connect(systemOperator).instantMint(user1.address, mintAmount, ethDepositTx))
@@ -92,6 +96,12 @@ describe('USDCControllerTest', function () {
 
       expect(await usdc.balanceOf(user1.address)).to.equal(actualMintAmount);
       expect(await usdc.balanceOf(treasury.address)).to.equal(fee);
+    });
+
+    it("should reject instant mint with invalid Ethereum transaction hash", async function () {
+      const mintAmount = ethers.parseUnits("500", 6);
+      await expect(controller.connect(systemOperator).instantMint(user1.address, mintAmount, invalidEthTxHash))
+        .to.be.revertedWith("Invalid eth deposit tx");
     });
 
     it("should not allow instant mint above threshold", async function () {
@@ -124,7 +134,7 @@ describe('USDCControllerTest', function () {
 
     it("should allow admin to finalize mint without ratification", async function () {
       const mintAmount = ethers.parseUnits("5000", 6);
-      const fee = mintAmount * BigInt(1000) / BigInt(1000000); // 0.1% fee
+      const fee = mintAmount * FEE_RATE / 1000000n; // 0.1% fee
       const actualMintAmount = mintAmount - fee;
 
       await expect(controller.connect(owner).finalizeMint(0))
@@ -384,7 +394,7 @@ describe('USDCControllerTest', function () {
         .to.be.revertedWith("To address does not match");
       await expect(controller.connect(mintRatifier1).ratifyMint(mintIndex, user1.address, ratifiedMintAmount, ethDepositTx))
         .to.be.revertedWith("Amount does not match");
-      await expect(controller.connect(mintRatifier1).ratifyMint(mintIndex, user1.address, largeMintAmount, "0x1234"))
+      await expect(controller.connect(mintRatifier1).ratifyMint(mintIndex, user1.address, largeMintAmount, "0x0693e9393cb2c141723ad9c6b46eda53ad66694af636007ae3021eb3de8c7121"))
         .to.be.revertedWith("Eth deposit tx does not match");
     });
   });

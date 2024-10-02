@@ -1,26 +1,30 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
+import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {AddressValidator} from "./library/AddressValidator.sol";
 
 /**
  * @title USD Coin (USDC)
  * @dev Implementation of the USDC with custom storage slot
  */
-contract USDC is Initializable, ContextUpgradeable, ERC20Upgradeable, PausableUpgradeable, Ownable2StepUpgradeable {
+contract USDC is Initializable, ContextUpgradeable, ERC20Upgradeable, PausableUpgradeable, Ownable2StepUpgradeable, ReentrancyGuardUpgradeable {
+    using SafeERC20 for IERC20;
+    using AddressValidator for string;
     uint256 public constant INITIAL_SUPPLY = 0;
     uint8 private constant DECIMALS = 6;
-    using AddressValidator for string;
 
     struct USDCStorage {
         mapping(address => bool) blacklisted;
         mapping(address => bool) whitelist;
-        uint minBurnAmount;
+        uint248 minBurnAmount;
         bool whitelistEnabled;
     }
 
@@ -40,9 +44,9 @@ contract USDC is Initializable, ContextUpgradeable, ERC20Upgradeable, PausableUp
     event DestroyedBlackFunds(address indexed user, uint256 amount);
     event WhitelistStatusChanged(bool enabled);
 
-    function initialize(address owner, uint256 minBurnAmount) initializer public {
+    function initialize(address owner, uint248 minBurnAmount) initializer public {
         require(owner != address(0), "Invalid owner address");
-        require(minBurnAmount > 0, "Minimum burn amount must be greater than 0");
+        require(minBurnAmount != 0, "Minimum burn amount must be greater than 0");
 
         __Ownable_init(owner);
         __ERC20_init("USD Coin", "USDC");
@@ -139,6 +143,7 @@ contract USDC is Initializable, ContextUpgradeable, ERC20Upgradeable, PausableUp
     function transferFrom(address from, address to, uint256 value)
     public
     override
+    notBlacklisted(_msgSender())
     notBlacklisted(from)
     notBlacklisted(to)
     returns (bool)
@@ -154,7 +159,8 @@ contract USDC is Initializable, ContextUpgradeable, ERC20Upgradeable, PausableUp
         emit DestroyedBlackFunds(_blackListedUser, amount);
     }
 
-    function updateBurnMinAmount(uint256 amount) external onlyOwner {
+    function updateBurnMinAmount(uint248 amount) external onlyOwner {
+        require(amount != 0, "Amount must be greater than 0");
         USDCStorage storage $ = _getUSDCStorage();
         uint256 oldAmount = $.minBurnAmount;
         $.minBurnAmount = amount;
@@ -196,15 +202,17 @@ contract USDC is Initializable, ContextUpgradeable, ERC20Upgradeable, PausableUp
         return $.minBurnAmount;
     }
 
-    /**
-     * @dev send all token balance of an arbitrary erc20 token
-     * in the contract to another address
-     * @param token token to reclaim
-     * @param _to address to send eth balance to
-     */
-    function reclaimToken(IERC20 token, address _to) external onlyOwner {
+    function reclaimToken(IERC20 token, address _to) external onlyOwner nonReentrant {
         require(_to != address(0), "Invalid recipient address");
         uint256 balance = token.balanceOf(address(this));
-        token.transfer(_to, balance);
+        token.safeTransfer(_to, balance);
+    }
+
+    function reclaimTRX(address payable _to) external onlyOwner nonReentrant {
+        require(_to != address(0), "Invalid address");
+        uint256 balance = address(this).balance;
+        require(balance != 0, "No TRX balance to reclaim");
+
+        _to.transfer(balance);
     }
 }

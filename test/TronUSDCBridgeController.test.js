@@ -41,10 +41,12 @@ describe('TronUSDCBridgeControllerTest', function () {
       ethers.parseUnits("1000", 6), // instantWithdrawThreshold
       ethers.parseUnits("10000", 6), // ratifiedWithdrawThreshold
       ethers.parseUnits("100000", 6), // multiSigWithdrawThreshold
-      FEE_RATE, // feeRate (0.1%)
-      treasurer.address
     ]);
     await controller.waitForDeployment();
+
+    // Set fee rate and treasurer
+    await controller.connect(owner).setTreasury(treasurer.address);
+    await controller.connect(owner).setFeeRate(FEE_RATE);
 
     // Setup roles
     await controller.grantRole(SYSTEM_OPERATOR_ROLE, systemOperator.address);
@@ -100,10 +102,17 @@ describe('TronUSDCBridgeControllerTest', function () {
 
   describe("Instant Withdraw", function () {
     const depositAmount = ethers.parseUnits("1000", 6);
+    const invalidTronTxHash = "0xinvalidTx";
     beforeEach(async function () {
-      // 模拟用户存款
+      // Simulate user deposit
       await mockUSDC.connect(user1).approve(tronUsdcBridge.getAddress(), depositAmount);
       await tronUsdcBridge.connect(user1).deposit(depositAmount, targetTronAddress);
+    });
+
+    it("should reject instant withdraw with invalid Tron transaction hash", async function () {
+      const withdrawAmount = ethers.parseUnits("1000", USDC_DECIMALS);
+      await expect(controller.connect(systemOperator).instantWithdraw(user1.address, withdrawAmount, invalidTronTxHash))
+        .to.be.revertedWith("Invalid Tron burn tx");
     });
 
     it("should allow system operator to perform instant withdraw", async function () {
