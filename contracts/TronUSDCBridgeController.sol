@@ -54,7 +54,14 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         uint256 withdrawReqInvalidBeforeThisBlock;
         address investmentAddress;
         address treasury;
-        uint256 feeRate; // Expressed in basis points, for example, 10000 means 1%.
+        uint256 feeRate;
+        uint256 instantWithdrawPool;
+        uint256 ratifiedWithdrawPool;
+        uint256 multiSigWithdrawPool;
+        uint256 multiSigWithdrawLimit;
+        uint256 instantWithdrawLimit;
+        uint256 ratifiedWithdrawLimit;
+        address[2] ratifiedPoolRefillApprovals;
     }
 
     // keccak256(abi.encode(uint256(keccak256("TronUSDC.storage.TronUSDCBridgeController")) - 1)) & ~bytes32(uint256(0xff))
@@ -78,6 +85,8 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
     event TreasurySet(address indexed oldTreasury, address indexed newTreasury);
     event FeeRateSet(uint256 oldFeeRate, uint256 newFeeRate);
     event WithdrawThresholdChanged(uint256 instant, uint256 ratified, uint256 multiSig);
+    event WithdrawLimitsChanged(uint256 instant, uint256 ratified, uint256 multiSig);
+    event PoolRefilled(string poolType, uint256 amount);
 
     error InvalidOperation();
 
@@ -86,13 +95,23 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         address _admin,
         uint256 _instantWithdrawThreshold,
         uint256 _ratifiedWithdrawThreshold,
-        uint256 _multiSigWithdrawThreshold
+        uint256 _multiSigWithdrawThreshold,
+        uint256 _instantWithdrawLimit,
+        uint256 _ratifiedWithdrawLimit,
+        uint256 _multiSigWithdrawLimit
     ) public initializer {
         require(_bridge != address(0), "Bridge address cannot be zero");
         require(_admin != address(0), "Admin address cannot be zero");
         require(_instantWithdrawThreshold != 0, "Invalid instant threshold");
         require(_ratifiedWithdrawThreshold > _instantWithdrawThreshold, "Ratified threshold must be greater than instant threshold");
         require(_multiSigWithdrawThreshold > _ratifiedWithdrawThreshold, "MultiSig threshold must be greater than ratified threshold");
+
+        require(_instantWithdrawLimit >= _instantWithdrawThreshold, "Instant withdraw limit must be greater than or equal to instant withdraw threshold");
+        require(_ratifiedWithdrawLimit >= _ratifiedWithdrawThreshold, "Ratified withdraw limit must be greater than or equal to ratified withdraw threshold");
+        require(_multiSigWithdrawLimit >= _multiSigWithdrawThreshold, "Multi-sig withdraw limit must be greater than or equal to multi-sig withdraw threshold");
+
+        require(_ratifiedWithdrawLimit > _instantWithdrawLimit, "Ratified withdraw limit must be greater than instant withdraw limit");
+        require(_multiSigWithdrawLimit > _ratifiedWithdrawLimit, "Multi-sig withdraw limit must be greater than ratified withdraw limit");
 
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -110,6 +129,14 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         $.instantWithdrawThreshold = _instantWithdrawThreshold;
         $.ratifiedWithdrawThreshold = _ratifiedWithdrawThreshold;
         $.multiSigWithdrawThreshold = _multiSigWithdrawThreshold;
+
+        $.instantWithdrawLimit = _instantWithdrawLimit;
+        $.ratifiedWithdrawLimit = _ratifiedWithdrawLimit;
+        $.multiSigWithdrawLimit = _multiSigWithdrawLimit;
+
+        $.instantWithdrawPool = _instantWithdrawLimit;
+        $.ratifiedWithdrawPool = _ratifiedWithdrawLimit;
+        $.multiSigWithdrawPool = _multiSigWithdrawLimit;
     }
 
     function acceptDefaultAdminTransfer() override public {
@@ -253,9 +280,12 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
 
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
         require(_value <= $.instantWithdrawThreshold, "Over the instant withdraw threshold");
+        require(_value <= $.instantWithdrawPool, "Instant withdraw pool is dry");
+
         uint256 fee = (_value * $.feeRate) / FEE_DENOMINATOR;
         uint256 withdrawAmount = _value - fee;
 
+        $.instantWithdrawPool -= _value;
         $.bridge.withdraw(_to, withdrawAmount);
         emit InstantWithdraw(_to, withdrawAmount, _tronBurnTx);
 
@@ -299,6 +329,7 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         string memory tronBurnTx = op.tronBurnTx;
         if (!hasRole(DEFAULT_ADMIN_ROLE, _msgSender())) {
             _canFinalize(_index);
+            _subtractFromWithdrawPool(value);
         }
 
         uint256 fee = (value * $.feeRate) / FEE_DENOMINATOR;
@@ -314,14 +345,23 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         }
     }
 
+    function _subtractFromWithdrawPool(uint256 _value) internal {
+        TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
+        if (_value <= $.ratifiedWithdrawPool && _value <= $.ratifiedWithdrawThreshold) {
+            $.ratifiedWithdrawPool -= _value;
+        } else {
+            $.multiSigWithdrawPool -= _value;
+        }
+    }
+
     function hasEnoughApproval(uint256 _numberOfApproval, uint256 _value) public view returns (bool) {
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
-        if (_value <= $.ratifiedWithdrawThreshold) {
+        if (_value <= $.ratifiedWithdrawPool && _value <= $.ratifiedWithdrawThreshold) {
             if (_numberOfApproval >= RATIFY_WITHDRAW_SIGS) {
                 return true;
             }
         }
-        if (_value <= $.multiSigWithdrawThreshold) {
+        if (_value <= $.multiSigWithdrawPool && _value <= $.multiSigWithdrawThreshold) {
             if (_numberOfApproval >= MULTISIG_WITHDRAW_SIGS) {
                 return true;
             }
@@ -380,11 +420,82 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
         require(_instant != 0, "Invalid instant threshold");
         require(_instant <= _ratified && _ratified <= _multiSig, "Invalid thresholds");
         TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
+
+        // check if the new thresholds are less than or equal to the limits
+        require(_instant <= $.instantWithdrawLimit, "Instant threshold must be less than or equal to instant limit");
+        require(_ratified <= $.ratifiedWithdrawLimit, "Ratified threshold must be less than or equal to ratified limit");
+        require(_multiSig <= $.multiSigWithdrawLimit, "Multi-sig threshold must be less than or equal to multi-sig limit");
+
         $.instantWithdrawThreshold = _instant;
         $.ratifiedWithdrawThreshold = _ratified;
         $.multiSigWithdrawThreshold = _multiSig;
 
         emit WithdrawThresholdChanged(_instant, _ratified, _multiSig);
+    }
+
+    function setWithdrawLimits(uint256 _instant, uint256 _ratified, uint256 _multiSig) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_instant != 0, "Invalid limits");
+        require(_instant <= _ratified && _ratified <= _multiSig, "Invalid limits");
+        TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
+
+        // check if the new limits are greater than or equal to the thresholds
+        require(_instant >= $.instantWithdrawThreshold, "Instant limit must be greater than or equal to instant threshold");
+        require(_ratified >= $.ratifiedWithdrawThreshold, "Ratified limit must be greater than or equal to ratified threshold");
+        require(_multiSig >= $.multiSigWithdrawThreshold, "Multi-sig limit must be greater than or equal to multi-sig threshold");
+
+        $.instantWithdrawLimit = _instant;
+        if ($.instantWithdrawPool > _instant) {
+            $.instantWithdrawPool = _instant;
+        }
+
+        $.ratifiedWithdrawLimit = _ratified;
+        if ($.ratifiedWithdrawPool > _ratified) {
+            $.ratifiedWithdrawPool = _ratified;
+        }
+
+        $.multiSigWithdrawLimit = _multiSig;
+        if ($.multiSigWithdrawPool > _multiSig) {
+            $.multiSigWithdrawPool = _multiSig;
+        }
+
+        emit WithdrawLimitsChanged(_instant, _ratified, _multiSig);
+    }
+
+    function refillInstantWithdrawPool() external onlyRole(WITHDRAW_RATIFIER_ROLE) {
+        TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
+        uint256 refillAmount = $.instantWithdrawLimit - $.instantWithdrawPool;
+        $.ratifiedWithdrawPool -= refillAmount;
+        $.instantWithdrawPool = $.instantWithdrawLimit;
+        emit PoolRefilled("Instant", refillAmount);
+    }
+
+    function refillRatifiedWithdrawPool() external onlyRole(WITHDRAW_RATIFIER_ROLE) {
+        TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
+        if (!hasRole(DEFAULT_ADMIN_ROLE, _msgSender())) {
+            address[2] memory refillApprovals = $.ratifiedPoolRefillApprovals;
+            require(_msgSender() != refillApprovals[0] && _msgSender() != refillApprovals[1], "Already approved");
+            if (refillApprovals[0] == address(0)) {
+                $.ratifiedPoolRefillApprovals[0] = _msgSender();
+                return;
+            }
+            if (refillApprovals[1] == address(0)) {
+                $.ratifiedPoolRefillApprovals[1] = _msgSender();
+                return;
+            }
+        }
+
+        delete $.ratifiedPoolRefillApprovals;
+        uint256 refillAmount = $.ratifiedWithdrawLimit - $.ratifiedWithdrawPool;
+        $.multiSigWithdrawPool -= refillAmount;
+        $.ratifiedWithdrawPool = $.ratifiedWithdrawLimit;
+        emit PoolRefilled("Ratified", refillAmount);
+    }
+
+    function refillMultiSigWithdrawPool() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        TronUSDCBridgeControllerStorage storage $ = _getTronUSDCBridgeControllerStorage();
+        uint256 refillAmount = $.multiSigWithdrawLimit - $.multiSigWithdrawPool;
+        $.multiSigWithdrawPool = $.multiSigWithdrawLimit;
+        emit PoolRefilled("MultiSig", refillAmount);
     }
 
     function invalidateAllPendingWithdraws() external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -460,5 +571,33 @@ contract TronUSDCBridgeController is Initializable, ContextUpgradeable, AccessCo
 
     function getWithdrawReqInvalidBeforeThisBlock() public view returns (uint256) {
         return _getTronUSDCBridgeControllerStorage().withdrawReqInvalidBeforeThisBlock;
+    }
+
+    function getInstantWithdrawLimit() public view returns (uint256) {
+        return _getTronUSDCBridgeControllerStorage().instantWithdrawLimit;
+    }
+
+    function getRatifiedWithdrawLimit() public view returns (uint256) {
+        return _getTronUSDCBridgeControllerStorage().ratifiedWithdrawLimit;
+    }
+
+    function getMultiSigWithdrawLimit() public view returns (uint256) {
+        return _getTronUSDCBridgeControllerStorage().multiSigWithdrawLimit;
+    }
+
+    function getInstantWithdrawPool() public view returns (uint256) {
+        return _getTronUSDCBridgeControllerStorage().instantWithdrawPool;
+    }
+
+    function getRatifiedWithdrawPool() public view returns (uint256) {
+        return _getTronUSDCBridgeControllerStorage().ratifiedWithdrawPool;
+    }
+
+    function getMultiSigWithdrawPool() public view returns (uint256) {
+        return _getTronUSDCBridgeControllerStorage().multiSigWithdrawPool;
+    }
+
+    function getRatifiedPoolRefillApprovals() public view returns (address[2] memory) {
+        return _getTronUSDCBridgeControllerStorage().ratifiedPoolRefillApprovals;
     }
 }

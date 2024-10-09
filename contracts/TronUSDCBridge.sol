@@ -91,8 +91,8 @@ contract TronUSDCBridge is Initializable, ContextUpgradeable, Ownable2StepUpgrad
     function withdraw(address user, uint256 amount) external whenNotPaused onlyOwner nonReentrant {
         BridgeStorage storage $ = _getBridgeStorage();
         require(user != address(0), "Invalid recipient address");
+        require(amount <= $.totalDeposited, "Insufficient deposited amount");
         require(amount <= USDCBalance(), "Insufficient USDC balance");
-
         $.totalDeposited -= amount;
         $.token.safeTransfer(user, amount);
         emit Withdrawn(user, amount);

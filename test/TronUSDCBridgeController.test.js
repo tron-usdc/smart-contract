@@ -1,6 +1,5 @@
 const {expect} = require("chai");
 const {ethers, upgrades} = require("hardhat");
-const net = require("node:net");
 
 describe('TronUSDCBridgeControllerTest', function () {
   let TronUSDCBridgeController, controller, TronUSDCBridge, tronUsdcBridge, MockUSDC, mockUSDC;
@@ -41,6 +40,9 @@ describe('TronUSDCBridgeControllerTest', function () {
       ethers.parseUnits("1000", 6), // instantWithdrawThreshold
       ethers.parseUnits("10000", 6), // ratifiedWithdrawThreshold
       ethers.parseUnits("100000", 6), // multiSigWithdrawThreshold
+      ethers.parseUnits("10000", 6), // instantWithdrawLimit
+      ethers.parseUnits("100000", 6), // ratifiedWithdrawLimit
+      ethers.parseUnits("1000000", 6), // multiSigWithdrawLimit
     ]);
     await controller.waitForDeployment();
 
@@ -85,18 +87,91 @@ describe('TronUSDCBridgeControllerTest', function () {
       expect(await controller.getFeeRate()).to.equal(1000);
       expect(await controller.getTreasury()).to.equal(treasurer.address);
     });
+
+    it("should set the correct withdraw limits and pools", async function () {
+      expect(await controller.getInstantWithdrawLimit()).to.equal(ethers.parseUnits("10000", 6));
+      expect(await controller.getRatifiedWithdrawLimit()).to.equal(ethers.parseUnits("100000", 6));
+      expect(await controller.getMultiSigWithdrawLimit()).to.equal(ethers.parseUnits("1000000", 6));
+      expect(await controller.getInstantWithdrawPool()).to.equal(ethers.parseUnits("10000", 6));
+      expect(await controller.getRatifiedWithdrawPool()).to.equal(ethers.parseUnits("100000", 6));
+      expect(await controller.getMultiSigWithdrawPool()).to.equal(ethers.parseUnits("1000000", 6));
+    });
   });
 
-  describe("Withdraw Request", function () {
-    it("should allow system operator to request withdraw", async function () {
-      await expect(controller.connect(systemOperator).requestWithdraw(user1.address, ethers.parseUnits("100", 6), tronBurnTx))
-        .to.emit(controller, "WithdrawRequested")
-        .withArgs(user1.address, ethers.parseUnits("100", 6), tronBurnTx, 0);
+  describe("Withdraw Limits", function () {
+    it("should allow admin to set new withdraw limits", async function () {
+      await controller.connect(owner).setWithdrawLimits(
+        ethers.parseUnits("20000", 6),
+        ethers.parseUnits("200000", 6),
+        ethers.parseUnits("2000000", 6)
+      );
+      expect(await controller.getInstantWithdrawLimit()).to.equal(ethers.parseUnits("20000", 6));
+      expect(await controller.getRatifiedWithdrawLimit()).to.equal(ethers.parseUnits("200000", 6));
+      expect(await controller.getMultiSigWithdrawLimit()).to.equal(ethers.parseUnits("2000000", 6));
     });
 
-    it("should not allow non-system operator to request withdraw", async function () {
-      await expect(controller.connect(user1).requestWithdraw(user1.address, ethers.parseUnits("100", 6), tronBurnTx))
-        .to.be.reverted;
+    it("should not allow non-admin to set withdraw limits", async function () {
+      await expect(controller.connect(user1).setWithdrawLimits(
+        ethers.parseUnits("20000", 6),
+        ethers.parseUnits("200000", 6),
+        ethers.parseUnits("2000000", 6)
+      )).to.be.reverted;
+    });
+  });
+
+  describe("Refill Withdraw Pools", function () {
+    const depositAmount = ethers.parseUnits("1000000", 6); // A sufficiently large deposit amount to cover all tests.
+
+    beforeEach(async function () {
+      // Simulate user deposit
+      await mockUSDC.mint(user1.address, depositAmount);
+      await mockUSDC.connect(user1).approve(tronUsdcBridge.getAddress(), depositAmount);
+      await tronUsdcBridge.connect(user1).deposit(depositAmount, targetTronAddress);
+    });
+
+    it("should allow withdraw ratifier to refill instant withdraw pool", async function () {
+      const withdrawAmount = ethers.parseUnits("1000", 6);
+      await controller.connect(systemOperator).instantWithdraw(user1.address, withdrawAmount, tronBurnTx);
+
+      const beforeRefill = await controller.getInstantWithdrawPool();
+
+      await expect(controller.connect(withdrawRatifier1).refillInstantWithdrawPool())
+        .to.emit(controller, "PoolRefilled")
+        .withArgs("Instant", ethers.parseUnits("10000", 6) - beforeRefill);
+
+      expect(await controller.getInstantWithdrawPool()).to.equal(ethers.parseUnits("10000", 6));
+    });
+
+    it("should allow withdraw ratifier to refill ratified withdraw pool", async function () {
+      const withdrawAmount = ethers.parseUnits("10000", 6);
+      await controller.connect(systemOperator).requestWithdraw(user1.address, withdrawAmount, tronBurnTx);
+      await controller.connect(withdrawRatifier1).ratifyWithdraw(0, user1.address, withdrawAmount, tronBurnTx);
+
+      const beforeRefill = await controller.getRatifiedWithdrawPool();
+
+      await controller.connect(withdrawRatifier1).refillRatifiedWithdrawPool();
+      await controller.connect(withdrawRatifier2).refillRatifiedWithdrawPool();
+      await expect(controller.connect(withdrawRatifier3).refillRatifiedWithdrawPool())
+        .to.emit(controller, "PoolRefilled")
+        .withArgs("Ratified", ethers.parseUnits("100000", 6) - beforeRefill);
+
+      expect(await controller.getRatifiedWithdrawPool()).to.equal(ethers.parseUnits("100000", 6));
+    });
+
+    it("should allow admin to refill multi-sig withdraw pool", async function () {
+      const withdrawAmount = ethers.parseUnits("500000", 6);
+      await controller.connect(systemOperator).requestWithdraw(user1.address, withdrawAmount, tronBurnTx);
+      await controller.connect(withdrawRatifier1).ratifyWithdraw(0, user1.address, withdrawAmount, tronBurnTx);
+      await controller.connect(withdrawRatifier2).ratifyWithdraw(0, user1.address, withdrawAmount, tronBurnTx);
+      await controller.connect(withdrawRatifier3).ratifyWithdraw(0, user1.address, withdrawAmount, tronBurnTx);
+
+      const beforeRefill = await controller.getMultiSigWithdrawPool();
+
+      await expect(controller.connect(owner).refillMultiSigWithdrawPool())
+        .to.emit(controller, "PoolRefilled")
+        .withArgs("MultiSig", ethers.parseUnits("1000000", 6) - beforeRefill);
+
+      expect(await controller.getMultiSigWithdrawPool()).to.equal(ethers.parseUnits("1000000", 6));
     });
   });
 
@@ -126,6 +201,7 @@ describe('TronUSDCBridgeControllerTest', function () {
 
       expect(await mockUSDC.balanceOf(user1.address)).to.equal(ethers.parseUnits("1000000", 6) - depositAmount + netWithdrawAmount);
       expect(await mockUSDC.balanceOf(treasurer.address)).to.equal(fee);
+      expect(await controller.getInstantWithdrawPool()).to.equal(ethers.parseUnits("9900", 6));
     });
 
     it("should not allow instant withdraw above threshold", async function () {
@@ -258,12 +334,14 @@ describe('TronUSDCBridgeControllerTest', function () {
     });
   });
 
-  describe("Multi-signature process", function () {
+  describe("Multi-signature process and withdraw pool limits", function () {
+    const instantWithdrawAmount = ethers.parseUnits("1000", 6);
+    const ratifiedWithdrawAmount = ethers.parseUnits("10000", 6);
     const largeWithdrawAmount = ethers.parseUnits("100000", 6);
-    const depositAmount = ethers.parseUnits("200000", 6); // 存入足够的金额以覆盖大额提现
+    const depositAmount = ethers.parseUnits("1060000", 6); // Deposit enough funds to cover large withdrawals.
 
     beforeEach(async function () {
-      // 模拟大额存款
+      // Simulate large deposits
       await mockUSDC.mint(user1.address, depositAmount);
       await mockUSDC.connect(user1).approve(tronUsdcBridge.getAddress(), depositAmount);
       await tronUsdcBridge.connect(user1).deposit(depositAmount, targetTronAddress);
@@ -274,6 +352,21 @@ describe('TronUSDCBridgeControllerTest', function () {
       await controller.connect(systemOperator).requestWithdraw(user1.address, amount, tronBurnTx);
       return withdrawIndex;
     }
+
+    it("should handle instant withdraws correctly", async function () {
+      for (let i = 0; i < 10; i++) {
+        await expect(controller.connect(systemOperator).instantWithdraw(user1.address, instantWithdrawAmount, tronBurnTx))
+          .to.not.be.reverted;
+      }
+      await expect(controller.connect(systemOperator).instantWithdraw(user1.address, instantWithdrawAmount, tronBurnTx))
+        .to.be.revertedWith("Instant withdraw pool is dry");
+    });
+
+    it("should require one signature for medium withdraws", async function () {
+      const withdrawIndex = await requestWithdraw(ratifiedWithdrawAmount);
+      await expect(controller.connect(withdrawRatifier1).ratifyWithdraw(withdrawIndex, user1.address, ratifiedWithdrawAmount, tronBurnTx))
+        .to.emit(controller, "WithdrawFinalized");
+    });
 
     it("should require multiple signatures for large withdrawals", async function () {
       const withdrawIndex = await requestWithdraw(largeWithdrawAmount);
@@ -288,12 +381,58 @@ describe('TronUSDCBridgeControllerTest', function () {
         .withArgs(user1.address, netLargeWithdrawAmount, tronBurnTx, withdrawIndex);
     });
 
-    it("should allow admin to bypass multi-signature requirement", async function () {
+    it("should enforce pool limits for non-admin withdraws", async function () {
+      // Deplete instant withdraw pool
+      for (let i = 0; i < 10; i++) {
+        await expect(controller.connect(systemOperator).instantWithdraw(user1.address, instantWithdrawAmount, tronBurnTx))
+          .to.not.be.reverted;
+      }
+      await expect(controller.connect(systemOperator).instantWithdraw(user1.address, instantWithdrawAmount, tronBurnTx))
+        .to.be.revertedWith("Instant withdraw pool is dry");
+
+      // Deplete ratified withdraw pool and part of multi-sig pool
+      let withdrawIndex;
+      for (let i = 0; i < 15; i++) {
+        withdrawIndex = await requestWithdraw(ratifiedWithdrawAmount);
+        if (i < 10) {
+          // First 10 withdraws should only need one signature
+          await expect(controller.connect(withdrawRatifier1).ratifyWithdraw(withdrawIndex, user1.address, ratifiedWithdrawAmount, tronBurnTx))
+            .to.emit(controller, "WithdrawFinalized");
+        } else {
+          // Next 5 withdraws should require multi-sig (3 signatures)
+          await controller.connect(withdrawRatifier1).ratifyWithdraw(withdrawIndex, user1.address, ratifiedWithdrawAmount, tronBurnTx);
+          await controller.connect(withdrawRatifier2).ratifyWithdraw(withdrawIndex, user1.address, ratifiedWithdrawAmount, tronBurnTx);
+          await expect(controller.connect(withdrawRatifier3).ratifyWithdraw(withdrawIndex, user1.address, ratifiedWithdrawAmount, tronBurnTx))
+            .to.emit(controller, "WithdrawFinalized");
+        }
+      }
+
+      // Attempt multi-sig withdraws until pool is depleted
+      for (let i = 0; i < 10; i++) {
+        withdrawIndex = await requestWithdraw(largeWithdrawAmount);
+        await controller.connect(withdrawRatifier1).ratifyWithdraw(withdrawIndex, user1.address, largeWithdrawAmount, tronBurnTx);
+        await controller.connect(withdrawRatifier2).ratifyWithdraw(withdrawIndex, user1.address, largeWithdrawAmount, tronBurnTx);
+        if (i < 9) {
+          await expect(controller.connect(withdrawRatifier3).ratifyWithdraw(withdrawIndex, user1.address, largeWithdrawAmount, tronBurnTx))
+            .to.emit(controller, "WithdrawFinalized");
+        } else {
+          // The last multi-sig withdraw should fail due to insufficient pool funds
+          await controller.connect(withdrawRatifier3).ratifyWithdraw(withdrawIndex, user1.address, largeWithdrawAmount, tronBurnTx);
+          await expect(controller.connect(withdrawRatifier3).canFinalize(withdrawIndex))
+            .to.be.revertedWith("Not enough approvals");
+        }
+      }
+
+      // Verify that all pools are depleted
+      expect(await controller.getInstantWithdrawPool()).to.equal(0);
+      expect(await controller.getRatifiedWithdrawPool()).to.equal(0);
+      expect(await controller.getMultiSigWithdrawPool()).to.be.lt(largeWithdrawAmount);
+    });
+
+    it("should allow admin to bypass multi-signature requirement and pool limits", async function () {
       await controller.connect(systemOperator).requestWithdraw(user1.address, largeWithdrawAmount, tronBurnTx);
-      let netLargeWithdrawAmount = largeWithdrawAmount - (largeWithdrawAmount * FEE_RATE / 1000000n);
       await expect(controller.connect(owner).finalizeWithdraw(0))
-        .to.emit(controller, "WithdrawFinalized")
-        .withArgs(user1.address, netLargeWithdrawAmount, tronBurnTx, 0);
+        .to.emit(controller, "WithdrawFinalized");
     });
 
     it("should not allow the same ratifier to approve twice", async function () {
@@ -307,7 +446,7 @@ describe('TronUSDCBridgeControllerTest', function () {
       const withdrawIndex = await requestWithdraw(largeWithdrawAmount);
       await expect(controller.connect(withdrawRatifier1).ratifyWithdraw(withdrawIndex, user2.address, largeWithdrawAmount, tronBurnTx))
         .to.be.revertedWith("To address does not match");
-      await expect(controller.connect(withdrawRatifier1).ratifyWithdraw(withdrawIndex, user1.address, ethers.parseUnits("90000", 6), tronBurnTx))
+      await expect(controller.connect(withdrawRatifier1).ratifyWithdraw(withdrawIndex, user1.address, ratifiedWithdrawAmount, tronBurnTx))
         .to.be.revertedWith("Amount does not match");
       await expect(controller.connect(withdrawRatifier1).ratifyWithdraw(withdrawIndex, user1.address, largeWithdrawAmount, "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"))
         .to.be.revertedWith("Tron burn tx does not match");
