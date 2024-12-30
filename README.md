@@ -2,17 +2,26 @@
 
 ## Table of Contents
 
-- [Project Overview](#project-overview)
-- [Key Features](#key-features)
-- [System Architecture](#system-architecture)
-- [Quick Start](#quick-start)
-- [Deployment](#deployment)
-- [Usage Guide](#usage-guide)
-- [Contract Functions](#contract-functions)
-- [Security](#security)
-- [Contribution Guidelines](#contribution-guidelines)
-- [License](#license)
-- [Contact Us](#contact-us)
+- [TRON-USDC Bridge](#tron-usdc-bridge)
+  - [Table of Contents](#table-of-contents)
+  - [Project Overview](#project-overview)
+  - [Key Features](#key-features)
+  - [System Architecture](#system-architecture)
+  - [Depolyment](#depolyment)
+  - [Quick Start](#quick-start)
+    - [Prerequisites](#prerequisites)
+    - [Installation](#installation)
+  - [Deployment](#deployment)
+  - [Usage Guide](#usage-guide)
+    - [Cross-Chain from Ethereum to TRON](#cross-chain-from-ethereum-to-tron)
+    - [Cross-Chain from TRON to Ethereum](#cross-chain-from-tron-to-ethereum)
+  - [Contract Functions](#contract-functions)
+    - [USDC Contract](#usdc-contract)
+    - [USDCController Contract](#usdccontroller-contract)
+    - [TronUSDCBridge Contract](#tronusdcbridge-contract)
+    - [TronUSDCBridgeController Contract](#tronusdcbridgecontroller-contract)
+  - [Security](#security)
+  - [License](#license)
 
 ## Project Overview
 
@@ -36,6 +45,14 @@ The system mainly consists of four smart contracts:
 2. **USDCController**: The controller contract managing USDC token on the TRON network
 3. **TronUSDCBridge**: The USDC staking contract on the Ethereum network
 4. **TronUSDCBridgeController**: The controller contract managing TronUSDCBridge on the Ethereum network
+
+## Depolyment
+| Name | Proxy | Implementation | Notes |
+| -------- | -------- | -------- | -------- |
+| [`TronUSDCBridge`](https://github.com/tron-usdc/smart-contract/blob/master/contracts/TronUSDCBridge.sol) | [`0xCC995FfE6FC6c687b8903bcfee3779eaB55d0C74`](https://etherscan.io/address/0xCC995FfE6FC6c687b8903bcfee3779eaB55d0C74) | [`0x0B8D8cc2eFf89dedfbC35d7c36b50e8A9ec01F88`](https://etherscan.io/address/0x0B8D8cc2eFf89dedfbC35d7c36b50e8A9ec01F88) | Proxy: [`TUP@5.0.2`](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v5.0.2/contracts/proxy/transparent/TransparentUpgradeableProxy.sol) |
+| [`TronUSDCBridgeController`](https://github.com/tron-usdc/smart-contract/blob/master/contracts/TronUSDCBridgeController.sol) | [`0x0160868e49A7803a68962E373113950557Db2994`](https://etherscan.io/address/0x0160868e49A7803a68962E373113950557Db2994) | [`0xDB146c798B1c20A8fC9944BD42BefB4d878B13a0`](https://etherscan.io/address/0xDB146c798B1c20A8fC9944BD42BefB4d878B13a0) | Proxy: [`TUP@5.0.2`](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v5.0.2/contracts/proxy/transparent/TransparentUpgradeableProxy.sol) |
+| [`USDC`](https://github.com/tron-usdc/smart-contract/blob/master/contracts/USDC.sol) | [`TLZSucJRjnqBKwvQz6n5hd29gbS4P7u7w8`](https://tronscan.org/#/address/TLZSucJRjnqBKwvQz6n5hd29gbS4P7u7w8) | [`TWCobEme6uZAv9xpo38hJqxzswAcYKwn7N`](https://tronscan.org/#/address/TWCobEme6uZAv9xpo38hJqxzswAcYKwn7N) | Proxy: [`TUP@5.0.2`](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v5.0.2/contracts/proxy/transparent/TransparentUpgradeableProxy.sol) |
+| [`USDCController`](https://github.com/tron-usdc/smart-contract/blob/master/contracts/USDCController.sol) | [`TQqmk4v4uP5buJY9QFCEtb6rbg2qyM47iD`](https://tronscan.org/#/address/TQqmk4v4uP5buJY9QFCEtb6rbg2qyM47iD) | [`TKpzh1SE5PLqehPZ5VtK8vx97HkHo7CWCc`](https://tronscan.org/#/address/TKpzh1SE5PLqehPZ5VtK8vx97HkHo7CWCc) | Proxy: [`TUP@5.0.2`](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v5.0.2/contracts/proxy/transparent/TransparentUpgradeableProxy.sol) |
 
 ## Quick Start
 
